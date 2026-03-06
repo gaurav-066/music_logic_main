@@ -44,7 +44,7 @@
         body {
             height: 100%;
             font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--bg-primary);
+            background: #000;
             color: var(--text-primary);
             overflow: hidden;
         }
@@ -72,7 +72,8 @@
 
         /* ===== APP LAYOUT ===== */
         #app {
-            display: flex;
+            display: none;
+            /* Hidden until login */
             height: 100vh;
             width: 100vw;
         }
@@ -260,9 +261,55 @@
             -webkit-backdrop-filter: blur(20px);
         }
 
+        .top-brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .top-brand .logo-icon {
+            width: 28px;
+            height: 28px;
+            background: var(--accent);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            color: #000;
+            font-weight: 800;
+            animation: logoFloat 3s ease-in-out infinite;
+        }
+
+        @keyframes logoFloat {
+
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+
+            50% {
+                transform: translateY(-3px);
+            }
+        }
+
+        .top-brand h2 {
+            font-size: 20px;
+            font-weight: 900;
+            letter-spacing: 2.5px;
+            text-transform: uppercase;
+            background: linear-gradient(135deg, var(--accent), #1ed760);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 20px rgba(29, 185, 84, 0.1);
+        }
+
         .search-container {
             position: relative;
             width: 380px;
+            display: none;
+            /* Hidden by default, shown in search view */
         }
 
         .search-container input {
@@ -1790,7 +1837,7 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: 16px 0;
+            padding: 6px 0 16px 0;
         }
 
         .fs-artwork img {
@@ -1928,13 +1975,37 @@
         #auth-screen {
             position: fixed;
             inset: 0;
-            background: #0a0a0a;
+            background: #000;
             z-index: 9999;
             display: flex;
             align-items: center;
             justify-content: center;
             flex-direction: column;
             padding: 24px;
+            transition: opacity 0.4s ease, visibility 0.4s;
+        }
+
+        #auth-screen.hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        .skeleton-box {
+            background: linear-gradient(90deg, #181818 25%, #242424 50%, #181818 75%);
+            background-size: 200% 100%;
+            animation: skeleton-loading 1.5s infinite;
+            border-radius: 4px;
+        }
+
+        @keyframes skeleton-loading {
+            0% {
+                background-position: 100% 0;
+            }
+
+            100% {
+                background-position: -100% 0;
+            }
         }
 
         .auth-box {
@@ -1943,6 +2014,19 @@
             background: #181818;
             border-radius: 12px;
             padding: 40px 32px;
+            animation: authFadeIn 0.6s ease-out;
+        }
+
+        @keyframes authFadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .auth-logo {
@@ -2102,8 +2186,31 @@
 </head>
 
 <body>
-    <div id="auth-screen" style="display:none">
-        <div class="auth-box">
+    <script>
+        // INSTANT TOKEN CHECK: Hide auth screen immediately if we have a session
+        // This runs BEFORE the rest of the body is parsed to prevent flickering
+        (function () {
+            try {
+                const hasToken = Object.keys(localStorage).some(k => k.includes('-auth-token'));
+                if (hasToken) {
+                    document.write('<style>#auth-screen { display: none !important; } #app { display: flex !important; }</style>');
+                }
+            } catch (e) { }
+        })();
+    </script>
+
+    <div id="auth-screen">
+        <!-- Initial Startup Splash -->
+        <div id="auth-splash" style="text-align:center;">
+            <div class="auth-logo"
+                style="margin-bottom:20px; font-size:40px; animation: float 3s ease-in-out infinite;">VYBZZ</div>
+            <div class="loading-spinner" style="margin: 0 auto 16px;">
+                <div class="spinner"></div>
+            </div>
+            <div style="font-size:11px; color:#6a6a6a; letter-spacing:2px; font-weight:700">RESTORING YOUR VIBE</div>
+        </div>
+
+        <div class="auth-box" id="auth-login-box" style="display:none">
             <div class="auth-logo">VYBZZ</div>
             <div class="auth-tagline">Cloud Sync — Your music, synced.</div>
             <input class="auth-input" id="auth-email" type="email" placeholder="Email address" autocomplete="email">
@@ -2174,7 +2281,11 @@
         <!-- MAIN CONTENT -->
         <main id="main-content">
             <div class="top-bar">
-                <div class="search-container">
+                <div class="top-brand" id="top-brand">
+                    <div class="logo-icon">♪</div>
+                    <h2>VYBZZ</h2>
+                </div>
+                <div class="search-container" id="search-container">
                     <form id="search-form" action="javascript:void(0)" style="display:contents">
                         <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
                             <path
@@ -2203,7 +2314,7 @@
     </div>
 
     <!-- MOBILE BOTTOM NAV -->
-    <nav id="mobile-nav">
+    <nav id="mobile-nav" style="display:none">
         <button class="mobile-nav-btn active" data-view="home">
             <svg viewBox="0 0 24 24" fill="currentColor">
                 <path d="M12 3L4 9v12h5v-7h6v7h5V9z" />
@@ -2234,7 +2345,7 @@
     </nav>
 
     <!-- BOTTOM PLAYER -->
-    <div id="player-bar">
+    <div id="player-bar" style="display:none">
         <div class="player-track-info">
             <img id="player-thumb"
                 src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 56 56'%3E%3Crect fill='%23242424' width='56' height='56'/%3E%3Ctext x='28' y='33' text-anchor='middle' fill='%236a6a6a' font-size='18'%3E♪%3C/text%3E%3C/svg%3E"
@@ -2558,7 +2669,8 @@
                     album: item.album?.name || '',
                     thumbnail: img,
                     duration: parseInt(item.duration) || 0,
-                    audioUrl: dlUrl
+                    audioUrl: dlUrl,
+                    language: (item.language || '').toLowerCase()
                 };
             }
         };
@@ -3062,6 +3174,20 @@
                 $$('.mobile-nav-btn').forEach(btn => {
                     btn.classList.toggle('active', btn.dataset.view === view);
                 });
+                // Handle Top Bar: Show Logo on most views, Search bar ONLY on search view
+                const brand = $('#top-brand');
+                const searchContainer = $('#search-container');
+                const searchInput = $('#search-input');
+
+                if (view === 'search') {
+                    if (brand) brand.style.display = 'none';
+                    if (searchContainer) searchContainer.style.display = 'block';
+                    if (searchInput && !data) setTimeout(() => searchInput.focus(), 100);
+                } else {
+                    if (brand) brand.style.display = 'flex';
+                    if (searchContainer) searchContainer.style.display = 'none';
+                    if (searchInput) searchInput.value = '';
+                }
                 const area = $('#content-area');
                 // Skip spinner for empty search (prevents flash)
                 if (view === 'search' && !data) {
@@ -3782,13 +3908,17 @@
                             }
                         });
 
-                        // Song item click → search for title instead of immediate play
+                        // Song item click → Play and Search
                         const normalizedSongs = songSuggestions.map(s => SaavnAPI.normalizeSong(s));
                         suggestionsEl.querySelectorAll('.suggest-song-item').forEach((item, idx) => {
                             item.addEventListener('click', () => {
-                                const term = normalizedSongs[idx].title;
+                                const song = normalizedSongs[idx];
+                                const term = song.title;
                                 searchInput.value = term;
                                 suggestionsEl.classList.remove('show');
+                                // Play it immediately
+                                Player.playSong(song, normalizedSongs, idx);
+                                // Show search results
                                 UI.setView('search', term);
                             });
                         });
@@ -4112,14 +4242,20 @@
 
                 const handleMove = (e) => {
                     const rect = pBar.getBoundingClientRect();
-                    const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+                    let clientX = 0;
+                    if (e.touches && e.touches.length > 0) clientX = e.touches[0].clientX;
+                    else if (e.changedTouches && e.changedTouches.length > 0) clientX = e.changedTouches[0].clientX;
+                    else clientX = e.clientX;
+
+                    const x = clientX - rect.left;
                     let fraction = Math.max(0, Math.min(1, x / rect.width));
 
                     if (type === 'fs') {
                         $('#fs-progress-fill').style.width = (fraction * 100) + '%';
-                        $('#fs-current-time').textContent = formatTime(fraction * Player.audio.duration);
+                        if (Player.audio.duration) $('#fs-current-time').textContent = formatTime(fraction * Player.audio.duration);
                     } else if (type === 'progress') {
                         $('#progress-fill').style.width = (fraction * 100) + '%';
+                        if (Player.audio.duration) $('#current-time').textContent = formatTime(fraction * Player.audio.duration);
                     } else if (type === 'volume') {
                         $('#volume-fill').style.width = (fraction * 100) + '%';
                     }
@@ -4143,10 +4279,12 @@
                 const endDrag = (e) => {
                     if (!isDragging) return;
                     isDragging = false;
-                    if (type === 'fs' || type === 'progress') window.isDraggingProgress = false;
                     const fraction = handleMove(e);
                     if (type === 'fs' || type === 'progress') {
                         Player.seek(fraction);
+                        // Delay clearing the flag so the UI doesn't snap back to old position
+                        // before the audio engine actually finishes the seek
+                        setTimeout(() => { window.isDraggingProgress = false; }, 200);
                     } else if (type === 'volume') {
                         Player.setVolume(fraction);
                     }
@@ -4216,8 +4354,8 @@
                 }
             });
 
-            // Load home view
-            UI.setView('home');
+            // Load home view ONLY if session exists (handled by Auth.init internally)
+            // UI.setView('home'); // Removed to prevent bypassing auth
 
             // Restore last played song (without auto-playing)
             const lastSong = Library.getLastSong();
@@ -4235,7 +4373,13 @@
             console.error('VYBZZ: Supabase SDK failed to load from CDN!');
             alert('Supabase Error: Backend SDK could not load. Check internet.');
         }
-        const _supabase = window.supabase.createClient('https://pktilljdrheroqhrtvsm.supabase.co', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdGlsbGpkcmhlcm9xaHJ0dnNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MTU4MDMsImV4cCI6MjA4ODI5MTgwM30.1HE3iiIWnio0IyDPW4LUNh9lQchVNgJmXmj8t04LCiM');
+        const _supabase = window.supabase.createClient('https://pktilljdrheroqhrtvsm.supabase.co', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrdGlsbGpkcmhlcm9xaHJ0dnNtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MTU4MDMsImV4cCI6MjA4ODI5MTgwM30.1HE3iiIWnio0IyDPW4LUNh9lQchVNgJmXmj8t04LCiM', {
+            auth: {
+                persistSession: true,
+                autoRefreshToken: true,
+                detectSessionInUrl: true
+            }
+        });
         console.log('VYBZZ: Supabase client created.');
         let currentUser = null;
 
@@ -4725,64 +4869,63 @@
                 }
             }
         };
+
         // === AUTH MANAGER ===
         const Auth = {
             isSignup: false,
 
+            isInitializing: false,
             async init() {
+                if (this.isInitializing) return;
+                this.isInitializing = true;
                 console.log('VYBZZ: Auth.init() started');
-                UserProfile.load();
 
-                // Show a loading indicator in console
-                console.log('VYBZZ: Fetching session...');
+                // Load profile and cache IN PARALLEL with session check
+                UserProfile.load();
+                const cachedHome = Library.getHomeCache();
 
                 try {
-                    // Force show auth screen if we don't get a session within 5 seconds
-                    const timeout = setTimeout(() => {
-                        if (!currentUser) {
-                            console.warn('VYBZZ: Session fetch timed out, showing login screen');
-                            this.showAuthScreen();
-                        }
-                    }, 5000);
-
                     const { data: { session }, error } = await _supabase.auth.getSession();
-                    clearTimeout(timeout);
-
-                    console.log('VYBZZ: session check:', session ? 'Found' : 'Not found');
-                    if (error) console.error('VYBZZ: Session error:', error);
 
                     if (session?.user) {
                         currentUser = session.user;
+                        // If we are already showing the app (from the instant script), just refresh data
+                        if (document.getElementById('app').style.display === 'flex') {
+                            this.updateStatus(`Linked: ${currentUser.email.split('@')[0]}`, '#1DB954');
+                            UI.renderHome($('#content-area'), cachedHome); // Render cache immediately
+                            this.isInitializing = false;
+                            return;
+                        }
                         await this.onLogin();
-                    } else {
-                        this.showAuthScreen();
+                        return;
                     }
+
+                    if (error) console.warn('VYBZZ: Session fetch error:', error.message);
+
+                    // No session or error -> Make sure auth screen is visible
+                    this.showAuthScreen();
                 } catch (e) {
-                    console.error('VYBZZ: Auth Init Error:', e);
-                    this.showAuthScreen(); // Fallback to login even on error
+                    console.error('VYBZZ: Fatal Auth Init Error:', e);
+                    this.showAuthScreen();
+                } finally {
+                    this.isInitializing = false;
                 }
 
-                _supabase.auth.onAuthStateChange(async (event, session) => {
-                    console.log('VYBZZ: Auth event:', event);
-                    if (event === 'SIGNED_IN' && session?.user) {
-                        console.log('VYBZZ: Signed in as', session.user.email);
-                        currentUser = session.user;
-                        await this.onLogin();
-                    } else if (event === 'SIGNED_OUT') {
-                        console.warn('VYBZZ: Signed out');
-                        currentUser = null;
-                        this.showAuthScreen();
-                        this.updateStatus('Logged Out', '#e74c3c');
-                    }
-                });
-
-                // Keyboard shortcut for debug: Ctrl+Shift+L to force auth screen
-                window.addEventListener('keydown', (e) => {
-                    if (e.ctrlKey && e.shiftKey && e.key === 'L') {
-                        console.log('VYBZZ: Emergency auth trigger');
-                        this.showAuthScreen();
-                    }
-                });
+                if (!this._authBound) {
+                    _supabase.auth.onAuthStateChange(async (event, session) => {
+                        console.log('VYBZZ: Auth event:', event);
+                        if (event === 'SIGNED_IN' && session?.user) {
+                            currentUser = session.user;
+                            await this.onLogin();
+                        } else if (event === 'SIGNED_OUT') {
+                            currentUser = null;
+                            if (this._rt) _supabase.removeChannel(this._rt);
+                            this.showAuthScreen();
+                            this.updateStatus('Logged Out', '#e74c3c');
+                        }
+                    });
+                    this._authBound = true;
+                }
             },
 
             updateStatus(text, color) {
@@ -4793,26 +4936,71 @@
             },
 
             showAuthScreen() {
-                document.getElementById('auth-screen').style.display = 'flex';
+                const screen = document.getElementById('auth-screen');
+                screen.style.display = 'flex';
+                screen.classList.remove('hidden');
+                document.getElementById('auth-splash').style.display = 'none';
+                document.getElementById('auth-login-box').style.display = 'block';
+
                 document.getElementById('app').style.display = 'none';
                 document.getElementById('player-bar').style.display = 'none';
                 document.getElementById('mobile-nav').style.display = 'none';
             },
 
             hideAuthScreen() {
-                document.getElementById('auth-screen').style.display = 'none';
+                const screen = document.getElementById('auth-screen');
+                screen.classList.add('hidden');
+                // Wait for fade transition before setting display:none
+                setTimeout(() => {
+                    if (screen.classList.contains('hidden')) screen.style.display = 'none';
+                }, 400);
+
                 document.getElementById('app').style.display = 'flex';
                 document.getElementById('player-bar').style.display = 'flex';
-                document.getElementById('mobile-nav').style.display = 'flex';
+                const isMobile = window.innerWidth < 768;
+                if (isMobile) document.getElementById('mobile-nav').style.display = 'flex';
             },
 
             async onLogin() {
                 console.log('VYBZZ: Running onLogin follow-ups');
                 this.hideAuthScreen();
-                this.renderUserPill();
                 this.updateStatus(`Linked: ${currentUser.email.split('@')[0]}`, '#1DB954');
-                await this.syncFromSupabase();
-                await this.loadProfileFromSupabase();
+
+                // Load initial home view
+                UI.setView('home');
+
+                // Do NOT await these — let them run in background so UI isn't blocked by slow network
+                this.syncFromSupabase().catch(e => console.warn('Background sync failed', e));
+                this.loadProfileFromSupabase().catch(e => console.warn('Profile load failed', e));
+                this.setupRealtime();
+            },
+
+            setupRealtime() {
+                if (!currentUser) return;
+                console.log('VYBZZ: Setting up Realtime listeners');
+
+                if (this._rt) _supabase.removeChannel(this._rt);
+
+                this._rt = _supabase.channel('user-sync-' + currentUser.id)
+                    .on('postgres_changes', {
+                        event: '*',
+                        schema: 'public',
+                        table: 'likes',
+                        filter: `user_id=eq.${currentUser.id}`
+                    }, (p) => {
+                        console.log('VYBZZ: RT Like', p);
+                        this.syncFromSupabase();
+                    })
+                    .on('postgres_changes', {
+                        event: '*',
+                        schema: 'public',
+                        table: 'playlists',
+                        filter: `user_id=eq.${currentUser.id}`
+                    }, (p) => {
+                        console.log('VYBZZ: RT Playlist', p);
+                        this.syncFromSupabase();
+                    })
+                    .subscribe();
             },
 
             renderUserPill() {
@@ -4932,6 +5120,7 @@
         const _origAddToPlaylist = Library.addToPlaylist.bind(Library);
         Library.addToPlaylist = function (playlistId, song) {
             _origAddToPlaylist(playlistId, song);
+            UserProfile.recordPlaylistAdd(song);
             if (currentUser) {
                 const pl = Library.getPlaylists().find(p => p.id === playlistId);
                 if (pl) {
@@ -5000,12 +5189,39 @@
             }
         };
 
-        // Override fetchAndQueueSuggestions// Override fetchAndQueueSuggestions with SmartQueue
+        // Override fetchAndQueueSuggestions with SmartQueue
         Player.fetchAndQueueSuggestions = async function (songId) {
             try {
                 const songs = await SmartQueue.build(this.currentSong);
                 if (songs.length > 0) {
                     this.queue.push(...songs);
+
+                    // Auto-save to "VYBZZ Picks" playlist
+                    if (currentUser) {
+                        const playlists = Library.getPlaylists();
+                        let picksPl = playlists.find(p => p.name === 'VYBZZ Picks');
+
+                        // Create it if doesn't exist
+                        if (!picksPl) {
+                            picksPl = Library.createPlaylist('VYBZZ Picks');
+                        }
+
+                        // Add songs (Library.addToPlaylist already deduplicates)
+                        songs.slice(0, 10).forEach(song => {
+                            Library.addToPlaylist(picksPl.id, song);
+                        });
+
+                        // Cap playlist at 50 songs — remove oldest if over
+                        const updated = Library.getPlaylists().find(p => p.name === 'VYBZZ Picks');
+                        if (updated && updated.songs.length > 50) {
+                            updated.songs = updated.songs.slice(-50);
+                            Library._set('vybzz_playlists', Library.getPlaylists().map(p =>
+                                p.name === 'VYBZZ Picks' ? updated : p
+                            ));
+                        }
+
+                        UI.renderSidebarPlaylists();
+                    }
                 }
             } catch (e) {
                 console.error('SmartQueue failed', e);
@@ -5046,8 +5262,13 @@
 
             $('#set-logout').onclick = async () => {
                 if (confirm('Are you sure you want to log out?')) {
-                    await _supabase.auth.signOut();
-                    showToast('Logged out');
+                    const { error } = await _supabase.auth.signOut();
+                    if (error) {
+                        showToast('Logout failed: ' + error.message);
+                    } else {
+                        showToast('Logged out');
+                        // Auth listener handles the UI switch
+                    }
                 }
             };
 
