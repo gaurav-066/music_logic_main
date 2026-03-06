@@ -3013,6 +3013,10 @@
             init() {
                 this.audio.addEventListener('timeupdate', () => this._updateProgress());
                 this.audio.addEventListener('ended', async () => {
+                    if (this.currentSong) {
+                        const features = AudioCache.get(this.currentSong.videoId);
+                        UserProfile.recordCompletion(this.currentSong, 1.0, features);
+                    }
                     if (this.currentSong && this.currentIndex >= this.queue.length - 2) {
                         await this.fetchAndQueueSuggestions(this.currentSong.videoId);
                     }
@@ -4235,68 +4239,310 @@
         console.log('VYBZZ: Supabase client created.');
         let currentUser = null;
 
+        // === SPOTIFY API (recommendations only) ===
+        const SpotifyAPI = {
+            async _call(endpoint) {
+                const { data, error } = await _supabase.functions.invoke('spotify-proxy', {
+                    body: { endpoint }
+                });
+                if (error) throw error;
+                return data;
+            },
+
+            async searchTrack(query) {
+                try {
+                    const data = await this._call(
+                        `/search?q=${encodeURIComponent(query)}&type=track&limit=1`
+                    );
+                    return data.tracks?.items?.[0] || null;
+                } catch (e) { return null; }
+            },
+
+            async getAudioFeatures(trackId) {
+                try {
+                    const data = await this._call(`/audio-features/${trackId}`);
+                    if (data.error) return null;
+                    return data;
+                } catch (e) { return null; }
+            },
+
+            async getRecommendations(seedTrackIds, targets = {}, limit = 20) {
+                try {
+                    const seeds = seedTrackIds.slice(0, 3).join(',');
+                    let query = `/recommendations?seed_tracks=${seeds}&limit=${limit}`;
+                    // Attach target audio features
+                    if (targets.energy !== undefined) query += `&target_energy=${targets.energy.toFixed(2)}`;
+                    if (targets.valence !== undefined) query += `&target_valence=${targets.valence.toFixed(2)}`;
+                    if (targets.danceability !== undefined) query += `&target_danceability=${targets.danceability.toFixed(2)}`;
+                    if (targets.tempo !== undefined) query += `&target_tempo=${Math.round(targets.tempo)}`;
+                    if (targets.min_energy !== undefined) query += `&min_energy=${targets.min_energy.toFixed(2)}`;
+                    if (targets.max_energy !== undefined) query += `&max_energy=${targets.max_energy.toFixed(2)}`;
+                    const data = await this._call(query);
+                    return data.tracks || [];
+                } catch (e) { return []; }
+            }
+        };
+
         // === USER TASTE PROFILE (personal only, never uses friend data) ===
         const UserProfile = {
             artistScores: {},
             languageScores: {},
+            songScores: {},
             skipHistory: [],
+            featureProfile: {
+                liked: {},
+                completed: {},
+                skipped: {},
+                byHour: {}  // keyed by hour 0-23
+            },
             _playStartTime: null,
+            _currentSongId: null,
 
             load() {
                 try {
                     this.artistScores = JSON.parse(localStorage.getItem('vybzz_artist_scores') || '{}');
                     this.languageScores = JSON.parse(localStorage.getItem('vybzz_lang_scores') || '{}');
+                    this.songScores = JSON.parse(localStorage.getItem('vybzz_song_scores') || '{}');
                     this.skipHistory = JSON.parse(localStorage.getItem('vybzz_skip_history') || '[]');
+                    this.featureProfile = JSON.parse(localStorage.getItem('vybzz_feature_profile') || '{"liked":{},"completed":{},"skipped":{},"byHour":{}}');
                 } catch (e) { }
             },
 
             save() {
                 localStorage.setItem('vybzz_artist_scores', JSON.stringify(this.artistScores));
                 localStorage.setItem('vybzz_lang_scores', JSON.stringify(this.languageScores));
+                localStorage.setItem('vybzz_song_scores', JSON.stringify(this.songScores));
                 localStorage.setItem('vybzz_skip_history', JSON.stringify(this.skipHistory));
-                // Sync to Supabase in background
+                localStorage.setItem('vybzz_feature_profile', JSON.stringify(this.featureProfile));
+
                 if (currentUser) {
                     _supabase.from('user_profile').upsert({
                         user_id: currentUser.id,
                         artist_scores: this.artistScores,
                         language_scores: this.languageScores,
-                        skip_history: this.skipHistory.slice(0, 50),
+                        song_scores: this.songScores,
+                        skip_history: this.skipHistory.slice(0, 100),
+                        feature_profile: this.featureProfile,
                         updated_at: new Date().toISOString()
                     }).then().catch(() => { });
                 }
             },
 
+            // Blend audio features into a running average
+            _blendFeatures(target, features, weight = 1) {
+                if (!features) return;
+                const keys = ['energy', 'valence', 'danceability', 'tempo', 'acousticness'];
+                if (!target.count) target.count = 0;
+                target.count += weight;
+                keys.forEach(k => {
+                    if (features[k] === undefined) return;
+                    target[k] = target[k] === undefined
+                        ? features[k]
+                        : target[k] + (features[k] - target[k]) * (weight / target.count);
+                });
+            },
+
             recordPlay(song) {
                 if (!song || song.isLocal) return;
                 this._playStartTime = Date.now();
-                // Boost artist score
+                this._currentSongId = song.videoId;
+
+                if (!this.songScores[song.videoId]) {
+                    this.songScores[song.videoId] = {
+                        title: song.title, artist: song.artist,
+                        language: song.language || '',
+                        plays: 0, replays: 0, totalCompletion: 0,
+                        skips: 0, liked: false, addedToPlaylist: false,
+                        score: 0, lastPlayed: null
+                    };
+                }
+
+                const s = this.songScores[song.videoId];
+                const now = Date.now();
+                const isReplay = (now - (s.lastPlayed || 0)) < 600000 && s.plays > 0;
+                s.plays += 1;
+                if (isReplay) s.replays += 1;
+                s.lastPlayed = now;
+
                 const artist = song.artist || '';
                 this.artistScores[artist] = (this.artistScores[artist] || 0) + 3;
+                if (song.language) {
+                    this.languageScores[song.language] = (this.languageScores[song.language] || 0) + 3;
+                }
+
+                this._recalcScore(song.videoId);
                 this.save();
             },
 
-            recordSkip(song) {
+            recordCompletion(song, fraction, audioFeatures = null) {
+                if (!song || song.isLocal) return;
+                if (!this.songScores[song.videoId]) return;
+
+                const s = this.songScores[song.videoId];
+                s.totalCompletion += fraction;
+
+                if (fraction >= 0.8) {
+                    // Strong positive signal — blend into completed profile
+                    this._blendFeatures(this.featureProfile.completed, audioFeatures, 1);
+
+                    // Also blend into hour-specific profile
+                    const hour = new Date().getHours();
+                    if (!this.featureProfile.byHour[hour]) this.featureProfile.byHour[hour] = {};
+                    this._blendFeatures(this.featureProfile.byHour[hour], audioFeatures, 1);
+
+                    const artist = song.artist || '';
+                    this.artistScores[artist] = (this.artistScores[artist] || 0) + 2;
+                    if (song.language) {
+                        this.languageScores[song.language] = (this.languageScores[song.language] || 0) + 2;
+                    }
+                }
+
+                this._recalcScore(song.videoId);
+                this.save();
+            },
+
+            recordSkip(song, audioFeatures = null) {
                 if (!song || song.isLocal) return;
                 const listenedSeconds = (Date.now() - (this._playStartTime || Date.now())) / 1000;
+                const fraction = Player.audio.duration ? (listenedSeconds / Player.audio.duration) : 0;
+
+                this.recordCompletion(song, fraction, audioFeatures);
+
                 if (listenedSeconds < 15) {
-                    // Strong dislike signal — skipped within 15 seconds
+                    if (!this.songScores[song.videoId]) return;
+                    const s = this.songScores[song.videoId];
+                    s.skips += 1;
+
+                    // Blend into skipped features profile — we'll avoid this zone
+                    this._blendFeatures(this.featureProfile.skipped, audioFeatures, 1);
+
                     const artist = song.artist || '';
                     this.artistScores[artist] = (this.artistScores[artist] || 0) - 2;
-                    // Add to skip history to filter from recommendations
-                    this.skipHistory = [song.videoId, ...this.skipHistory].slice(0, 100);
+                    if (song.language) {
+                        this.languageScores[song.language] = (this.languageScores[song.language] || 0) - 1;
+                    }
+
+                    if (s.skips >= 3) {
+                        this.skipHistory = [song.videoId, ...this.skipHistory].slice(0, 100);
+                    }
+
+                    this._recalcScore(song.videoId);
                     this.save();
                 }
             },
 
-            recordLike(song) {
+            recordLike(song, audioFeatures = null) {
                 if (!song || song.isLocal) return;
+
+                if (!this.songScores[song.videoId]) {
+                    this.songScores[song.videoId] = {
+                        title: song.title, artist: song.artist,
+                        language: song.language || '',
+                        plays: 0, replays: 0, totalCompletion: 0,
+                        skips: 0, liked: false, addedToPlaylist: false,
+                        score: 0, lastPlayed: null
+                    };
+                }
+
+                const s = this.songScores[song.videoId];
+                s.liked = !s.liked;
+
+                // Liked songs get strongest feature weight
+                if (s.liked) {
+                    this._blendFeatures(this.featureProfile.liked, audioFeatures, 2);
+                }
+
+                const multiplier = s.liked ? 1 : -1;
                 const artist = song.artist || '';
-                this.artistScores[artist] = (this.artistScores[artist] || 0) + 5;
+                this.artistScores[artist] = (this.artistScores[artist] || 0) + (5 * multiplier);
+                if (song.language) {
+                    this.languageScores[song.language] = (this.languageScores[song.language] || 0) + (5 * multiplier);
+                }
+
+                this._recalcScore(song.videoId);
                 this.save();
+            },
+
+            recordPlaylistAdd(song) {
+                if (!song || song.isLocal) return;
+                if (!this.songScores[song.videoId]) return;
+                this.songScores[song.videoId].addedToPlaylist = true;
+                this._recalcScore(song.videoId);
+                this.save();
+            },
+
+            _recalcScore(videoId) {
+                const s = this.songScores[videoId];
+                if (!s) return;
+                const avgCompletion = s.plays > 0 ? s.totalCompletion / s.plays : 0;
+                s.score = (s.plays * 3)
+                    + (s.replays * 8)
+                    + (avgCompletion * 5)
+                    + (s.liked ? 10 : 0)
+                    + (s.addedToPlaylist ? 7 : 0)
+                    - (s.skips * 4);
+            },
+
+            // Build target audio features for current moment
+            getTargetFeatures() {
+                const hour = new Date().getHours();
+                const liked = this.featureProfile.liked;
+                const completed = this.featureProfile.completed;
+                const hourProfile = this.featureProfile.byHour[hour] || {};
+                const skipped = this.featureProfile.skipped;
+
+                // No data yet — return null, SmartQueue will skip targets
+                if (!completed.energy && !liked.energy) return null;
+
+                const keys = ['energy', 'valence', 'danceability', 'tempo', 'acousticness'];
+                const base = {};
+
+                // Weighted blend: liked(50%) + completed(30%) + hourProfile(20%)
+                keys.forEach(k => {
+                    const vals = [];
+                    if (liked[k] !== undefined) vals.push({ v: liked[k], w: 0.5 });
+                    if (completed[k] !== undefined) vals.push({ v: completed[k], w: 0.3 });
+                    if (hourProfile[k] !== undefined) vals.push({ v: hourProfile[k], w: 0.2 });
+                    if (vals.length === 0) return;
+                    const totalW = vals.reduce((s, x) => s + x.w, 0);
+                    base[k] = vals.reduce((s, x) => s + x.v * (x.w / totalW), 0);
+                });
+
+                // Time-of-day adjustment
+                if (hour >= 5 && hour < 9) {
+                    base.energy = Math.min(1, (base.energy || 0.6) + 0.15);
+                    base.valence = Math.min(1, (base.valence || 0.5) + 0.1);
+                } else if (hour >= 22 || hour < 2) {
+                    base.energy = Math.max(0, (base.energy || 0.5) - 0.2);
+                    base.acousticness = Math.min(1, (base.acousticness || 0.3) + 0.2);
+                }
+
+                // Avoid skipped zone — set min_energy to skip zone + buffer
+                if (skipped.energy !== undefined) {
+                    // If we keep skipping high energy → cap max, if low energy → set min
+                    if (skipped.energy > 0.7) base.max_energy = skipped.energy - 0.1;
+                    if (skipped.energy < 0.4) base.min_energy = skipped.energy + 0.1;
+                }
+
+                return base;
+            },
+
+            getTopSongs(n = 5) {
+                return Object.entries(this.songScores)
+                    .filter(([id, s]) => s.score > 0 && !this.skipHistory.includes(id))
+                    .sort((a, b) => b[1].score - a[1].score)
+                    .slice(0, n)
+                    .map(([id, s]) => ({ videoId: id, ...s }));
             },
 
             getTopArtist() {
                 const entries = Object.entries(this.artistScores);
+                if (entries.length === 0) return null;
+                return entries.sort((a, b) => b[1] - a[1])[0][0];
+            },
+
+            getTopLanguage() {
+                const entries = Object.entries(this.languageScores);
                 if (entries.length === 0) return null;
                 return entries.sort((a, b) => b[1] - a[1])[0][0];
             },
@@ -4311,13 +4557,48 @@
             },
 
             scoreAndRank(songs) {
+                const topLang = this.getTopLanguage();
                 return songs
                     .filter(s => !this.skipHistory.includes(s.videoId))
                     .map(s => ({
                         ...s,
                         _score: (this.artistScores[s.artist] || 0)
+                            + (s.language && s.language === topLang ? 4 : 0)
+                            + (this.languageScores[s.language] || 0) * 0.5
+                            + (this.songScores[s.videoId]?.score || 0) * 0.3
                     }))
                     .sort((a, b) => b._score - a._score);
+            }
+        };
+
+        const AudioCache = {
+            get(videoId) {
+                try {
+                    const cache = JSON.parse(localStorage.getItem('vybzz_audio_features') || '{}');
+                    return cache[videoId] || null;
+                } catch (e) { return null; }
+            },
+
+            set(videoId, features) {
+                try {
+                    const cache = JSON.parse(localStorage.getItem('vybzz_audio_features') || '{}');
+                    cache[videoId] = features;
+                    localStorage.setItem('vybzz_audio_features', JSON.stringify(cache));
+
+                    if (currentUser) {
+                        _supabase.from('user_profile').upsert({
+                            user_id: currentUser.id,
+                            audio_features: cache,
+                            updated_at: new Date().toISOString()
+                        }).then().catch(() => { });
+                    }
+                } catch (e) { }
+            },
+
+            getAll() {
+                try {
+                    return JSON.parse(localStorage.getItem('vybzz_audio_features') || '{}');
+                } catch (e) { return {}; }
             }
         };
 
@@ -4325,48 +4606,125 @@
         const SmartQueue = {
             async build(currentSong) {
                 try {
-                    const topArtist = UserProfile.getTopArtist();
-                    const timeContext = UserProfile.getTimeContext();
+                    const topLanguage = UserProfile.getTopLanguage();
+                    let spotifyRecommendedSongs = [];
+                    let likedSeeds = [];
 
-                    const calls = [
-                        SaavnAPI._fetchWithRetry(`/api/songs/${currentSong.videoId}/suggestions`)
-                            .then(j => (j.data || []).map(s => SaavnAPI.normalizeSong(s)))
-                            .catch(() => [])
-                    ];
+                    // === STEP 1 — Build target audio features from user profile ===
+                    const targets = UserProfile.getTargetFeatures();
 
-                    if (topArtist) {
-                        calls.push(
-                            SaavnAPI.search(`${topArtist} hits`, 8).then(r => r.map(s => SaavnAPI.normalizeSong(s))).catch(() => [])
-                        );
-                    }
+                    // === STEP 2 — Get Spotify IDs for top scored songs ===
+                    const topScored = UserProfile.getTopSongs(3);
+                    const spotifyIds = [];
 
-                    calls.push(
-                        SaavnAPI.search(timeContext, 8).then(r => r.map(s => SaavnAPI.normalizeSong(s))).catch(() => [])
-                    );
-
-                    const results = await Promise.all(calls);
-                    const [suggestions, artistSongs = [], moodSongs = []] = results;
-
-                    // Merge — suggestions first, then fill with artist and mood
-                    const seen = new Set([currentSong.videoId]);
-                    const merged = [];
-
-                    for (const song of [...suggestions, ...artistSongs, ...moodSongs]) {
-                        if (!seen.has(song.videoId)) {
-                            seen.add(song.videoId);
-                            merged.push(song);
+                    for (const song of topScored) {
+                        const cached = AudioCache.get(song.videoId);
+                        if (cached?.spotifyId) {
+                            spotifyIds.push(cached.spotifyId);
+                        } else {
+                            const track = await SpotifyAPI.searchTrack(`${song.title} ${song.artist}`);
+                            if (track) spotifyIds.push(track.id);
                         }
                     }
 
-                    // Score and rank by personal taste
-                    return UserProfile.scoreAndRank(merged).slice(0, 20);
+                    // Also include current song as seed if cached
+                    const currentCached = AudioCache.get(currentSong.videoId);
+                    if (currentCached?.spotifyId && !spotifyIds.includes(currentCached.spotifyId)) {
+                        spotifyIds.unshift(currentCached.spotifyId);
+                    }
+
+                    // === STEP 3 — Spotify recommendations with audio feature targets ===
+                    if (spotifyIds.length > 0) {
+                        const spotifyTracks = await SpotifyAPI.getRecommendations(spotifyIds, targets || {}, 20);
+
+                        const jioResults = await Promise.all(
+                            spotifyTracks.map(track => {
+                                const query = `${track.name} ${track.artists[0]?.name || ''}`;
+                                return SaavnAPI.search(query, 1)
+                                    .then(r => r.length > 0 ? SaavnAPI.normalizeSong(r[0]) : null)
+                                    .catch(() => null);
+                            })
+                        );
+                        spotifyRecommendedSongs = jioResults.filter(Boolean);
+                    }
+
+                    // === STEP 4 — Supabase seeds fallback ===
+                    if (currentUser && spotifyRecommendedSongs.length < 10) {
+                        const [{ data: likes }, { data: history }] = await Promise.all([
+                            _supabase.from('likes').select('song_data').eq('user_id', currentUser.id).limit(50),
+                            _supabase.from('play_history').select('song_data')
+                                .eq('user_id', currentUser.id)
+                                .order('played_at', { ascending: false }).limit(100)
+                        ]);
+
+                        const likedSongs = likes ? likes.map(l => l.song_data) : [];
+                        const historySongs = history ? history.map(h => h.song_data) : [];
+                        const combinedPool = [...likedSongs, ...likedSongs, ...historySongs];
+
+                        if (combinedPool.length > 0) {
+                            const shuffled = combinedPool.sort(() => Math.random() - 0.5);
+                            const seenSeeds = new Set();
+                            const uniqueSeeds = [];
+                            for (const s of shuffled) {
+                                if (!seenSeeds.has(s.videoId)) {
+                                    seenSeeds.add(s.videoId);
+                                    uniqueSeeds.push(s);
+                                }
+                                if (uniqueSeeds.length >= 4) break;
+                            }
+                            const seedResults = await Promise.all(
+                                uniqueSeeds.map(seed =>
+                                    SaavnAPI._fetchWithRetry(`/api/songs/${seed.videoId}/suggestions`)
+                                        .then(j => (j.data || []).map(s => SaavnAPI.normalizeSong(s)))
+                                        .catch(() => [])
+                                )
+                            );
+                            likedSeeds = seedResults.flat();
+                        }
+                    }
+
+                    // === STEP 5 — Language/mood fallback ===
+                    const timeContext = UserProfile.getTimeContext();
+                    const langTimeQuery = topLanguage ? `${topLanguage} ${timeContext}` : timeContext;
+
+                    const [currentSuggestions, moodSongs] = await Promise.all([
+                        SaavnAPI._fetchWithRetry(`/api/songs/${currentSong.videoId}/suggestions`)
+                            .then(j => (j.data || []).map(s => SaavnAPI.normalizeSong(s)))
+                            .catch(() => []),
+                        SaavnAPI.search(langTimeQuery, 6)
+                            .then(r => r.map(s => SaavnAPI.normalizeSong(s)))
+                            .catch(() => [])
+                    ]);
+
+                    // === MERGE ===
+                    const currentTitleBase = currentSong.title.toLowerCase()
+                        .replace(/\(.*?\)/g, '')
+                        .replace(/reprise|unplugged|remix|cover|version|remaster/gi, '')
+                        .trim();
+
+                    const seen = new Set([currentSong.videoId]);
+                    const merged = [];
+
+                    for (const song of [...spotifyRecommendedSongs, ...likedSeeds, ...currentSuggestions, ...moodSongs]) {
+                        if (!song?.videoId) continue;
+                        const titleBase = song.title.toLowerCase()
+                            .replace(/\(.*?\)/g, '')
+                            .replace(/reprise|unplugged|remix|cover|version|remaster/gi, '')
+                            .trim();
+                        if (seen.has(song.videoId)) continue;
+                        if (titleBase === currentTitleBase) continue;
+                        seen.add(song.videoId);
+                        merged.push(song);
+                    }
+
+                    return UserProfile.scoreAndRank(merged).slice(0, 25);
+
                 } catch (e) {
                     console.error('SmartQueue build failed', e);
                     return [];
                 }
             }
         };
-
         // === AUTH MANAGER ===
         const Auth = {
             isSignup: false,
@@ -4511,8 +4869,12 @@
                     if (data) {
                         UserProfile.artistScores = data.artist_scores || {};
                         UserProfile.languageScores = data.language_scores || {};
+                        UserProfile.songScores = data.song_scores || {};
                         UserProfile.skipHistory = data.skip_history || [];
                         UserProfile.save();
+                        if (data.audio_features) {
+                            localStorage.setItem('vybzz_audio_features', JSON.stringify(data.audio_features));
+                        }
                     }
                 } catch (e) { }
             }
@@ -4522,7 +4884,8 @@
         const _origToggleLike = Library.toggleLike.bind(Library);
         Library.toggleLike = function (song) {
             const result = _origToggleLike(song);
-            UserProfile.recordLike(song);
+            const features = AudioCache.get(song.videoId);
+            UserProfile.recordLike(song, features);
             if (currentUser) {
                 if (result) {
                     // Liked — insert to Supabase
@@ -4597,10 +4960,34 @@
         Player.playSong = async function (song, queue, index) {
             // Record skip on previous song BEFORE switching
             if (this.currentSong && this.isPlaying) {
-                UserProfile.recordSkip(this.currentSong);
+                const prevFeatures = AudioCache.get(this.currentSong.videoId);
+                UserProfile.recordSkip(this.currentSong, prevFeatures);
             }
             await _origPlaySong(song, queue, index);
             UserProfile.recordPlay(song);
+
+            // Fetch and cache Spotify audio features in background
+            SpotifyAPI.searchTrack(`${song.title} ${song.artist}`)
+                .then(async spotifyTrack => {
+                    if (!spotifyTrack) return;
+                    const features = await SpotifyAPI.getAudioFeatures(spotifyTrack.id);
+                    if (!features || features.error) return;
+
+                    // Store spotify ID on song for later use
+                    const stored = {
+                        spotifyId: spotifyTrack.id,
+                        danceability: features.danceability,
+                        energy: features.energy,
+                        valence: features.valence,
+                        tempo: features.tempo,
+                        acousticness: features.acousticness,
+                        instrumentalness: features.instrumentalness
+                    };
+
+                    // Use AudioCache which handles both localStorage and Supabase sync
+                    AudioCache.set(song.videoId, stored);
+                })
+                .catch(() => { }); // Never block playback
             // Fire and forget to Supabase
             if (currentUser) {
                 _supabase.from('play_history').insert({
@@ -4613,7 +5000,7 @@
             }
         };
 
-        // Override fetchAndQueueSuggestions with SmartQueue
+        // Override fetchAndQueueSuggestions// Override fetchAndQueueSuggestions with SmartQueue
         Player.fetchAndQueueSuggestions = async function (songId) {
             try {
                 const songs = await SmartQueue.build(this.currentSong);
